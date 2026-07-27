@@ -1,6 +1,7 @@
 import time
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
 from selenium import webdriver
@@ -93,4 +94,7 @@ def root():
 @app.post("/scrape")
 def scrape(req: ScrapeRequest):
     data = scrape_exhibitors(req.url)
-    return {"count": len(data), "data": data}
+    return JSONResponse(
+        content={"count": len(data), "data": data},
+        media_type="application/json; charset=utf-8",
+    )
