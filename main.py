@@ -27,8 +27,8 @@ def get_driver():
     options.add_argument("--disable-gpu")
     options.add_argument("--disable-extensions")
     options.add_argument("--disable-software-rasterizer")
-    options.add_argument("--single-process")
     options.add_argument("--window-size=1280,800")
+    options.add_argument("--remote-debugging-port=9222")
     # Block images to save memory and speed up loading - we don't need them
     options.add_experimental_option(
         "prefs", {"profile.managed_default_content_settings.images": 2}
