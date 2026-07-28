@@ -39,12 +39,57 @@ def get_driver():
     return webdriver.Chrome(service=service, options=options)
 
 
+def dismiss_cookie_banner(driver):
+    """Try common cookie-consent button patterns. Safe to fail silently if none match."""
+    common_selectors = [
+        "button[data-action-type='accept']",
+        "button#accept",
+        "#onetrust-accept-btn-handler",
+        "button#onetrust-accept-btn-handler",
+        ".cc-btn.cc-allow",
+        ".cookie-accept",
+        "[class*='cookie'] button",
+        "[id*='cookie'] button",
+        "button[class*='accept']",
+        "button[id*='accept']",
+    ]
+    for selector in common_selectors:
+        try:
+            btn = WebDriverWait(driver, 3).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, selector))
+            )
+            driver.execute_script("arguments[0].click();", btn)
+            time.sleep(0.5)
+            return True
+        except Exception:
+            continue
+
+    # Fallback: look for any button/link containing common accept-cookie wording
+    keywords = ["accept", "zaakceptuj", "akceptuję", "zgadzam", "agree", "allow"]
+    try:
+        clickable = driver.find_elements(By.CSS_SELECTOR, "button, a")
+        for el in clickable:
+            text = (el.text or "").strip().lower()
+            if any(k in text for k in keywords):
+                driver.execute_script("arguments[0].click();", el)
+                time.sleep(0.5)
+                return True
+    except Exception:
+        pass
+
+    return False
+
+
 def scrape_exhibitors(url):
     driver = get_driver()
     data = []
     try:
         driver.get(url)
         wait = WebDriverWait(driver, 15)
+
+        # Dismiss any cookie banner before interacting with the page
+        dismiss_cookie_banner(driver)
+
         wait.until(
             EC.presence_of_all_elements_located(
                 (By.CSS_SELECTOR, ".exhibitors__container-list")
