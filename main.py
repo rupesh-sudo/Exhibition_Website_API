@@ -1,4 +1,7 @@
 import time
+from urllib.parse import urlparse
+
+import requests
 
 from fastapi import FastAPI
 from fastapi.responses import JSONResponse
@@ -19,6 +22,9 @@ class ScrapeRequest(BaseModel):
     url: str
 
 
+# ============================================================
+# SHARED: CHROME DRIVER SETUP
+# ============================================================
 def get_driver():
     options = Options()
     options.add_argument("--headless=new")
@@ -29,7 +35,6 @@ def get_driver():
     options.add_argument("--disable-software-rasterizer")
     options.add_argument("--window-size=1280,800")
     options.add_argument("--remote-debugging-port=9222")
-    # Block images to save memory and speed up loading - we don't need them
     options.add_experimental_option(
         "prefs", {"profile.managed_default_content_settings.images": 2}
     )
@@ -64,7 +69,6 @@ def dismiss_cookie_banner(driver):
         except Exception:
             continue
 
-    # Fallback: look for any button/link containing common accept-cookie wording
     keywords = ["accept", "zaakceptuj", "akceptuję", "zgadzam", "agree", "allow"]
     try:
         clickable = driver.find_elements(By.CSS_SELECTOR, "button, a")
@@ -80,14 +84,17 @@ def dismiss_cookie_banner(driver):
     return False
 
 
-def scrape_exhibitors(url):
+# ============================================================
+# TEMPLATE: PWE EXPOPLANNER / PTAK WARSAW EXPO NETWORK
+# (packagingpoland.pl, compositepoland.com, solarenergyexpo.com, etc.)
+# ============================================================
+def scrape_ptak_warsaw(url):
     driver = get_driver()
     data = []
     try:
         driver.get(url)
         wait = WebDriverWait(driver, 15)
 
-        # Dismiss any cookie banner before interacting with the page
         dismiss_cookie_banner(driver)
 
         wait.until(
@@ -98,6 +105,7 @@ def scrape_exhibitors(url):
 
         exhibitors = driver.find_elements(By.CSS_SELECTOR, ".exhibitors__container-list")
         total = len(exhibitors)
+        print(f"Total exhibitors found: {total}")
 
         for i in range(total):
             try:
@@ -132,7 +140,6 @@ def scrape_exhibitors(url):
                         "document.getElementById('my-modal').style.display='none';"
                     )
             except Exception as row_error:
-                # Skip this exhibitor but keep going - one bad row shouldn't kill the run
                 print(f"Skipped exhibitor {i}: {row_error}")
                 continue
     finally:
@@ -141,23 +148,99 @@ def scrape_exhibitors(url):
     return data
 
 
+# ============================================================
+# ROUTER: detects the right scraper by HTML structure, not URL/domain
+# ============================================================
+def detect_template(url):
+    """Fetch raw HTML and check for signature markers unique to each known template."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/138.0.0.0 Safari/537.36"
+        )
+    }
+    try:
+        response = requests.get(url, headers=headers, timeout=15)
+        html = response.text
+    except Exception:
+        html = ""
+
+    if "exhibitors__container-list" in html and "my-modal" in html:
+        return "ptak_warsaw"
+
+    return None
+
+
+def route_scraper(url):
+    template = detect_template(url)
+
+    if template == "ptak_warsaw":
+        return {"supported": True, "template": "ptak_warsaw", "data": scrape_ptak_warsaw(url)}
+
+    return {
+        "supported": False,
+        "data": [],
+        "message": (
+            "No scraper template exists yet for this website's structure. "
+            "Add a new template: inspect the exhibitor listing HTML, add a "
+            "detection signature to detect_template(), and write a matching "
+            "scrape_<platform_name>() function in main.py."
+        ),
+    }
+
+
+# ============================================================
+# API ENDPOINTS
+# ============================================================
 @app.get("/")
 def root():
-    # Simple health check - hit this URL in a browser to confirm the service is live
     return {"status": "ok", "message": "Scraper API is running"}
 
 
 @app.post("/scrape")
 def scrape(req: ScrapeRequest):
+    start_time = time.time()
+
     try:
-        data = scrape_exhibitors(req.url)
+        result = route_scraper(req.url)
+        elapsed_seconds = time.time() - start_time
+        elapsed_minutes = round(elapsed_seconds / 60, 2)
+
+        if not result["supported"]:
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "supported": False,
+                    "count": 0,
+                    "data": [],
+                    "message": result["message"],
+                    "time_taken_minutes": elapsed_minutes,
+                },
+                media_type="application/json; charset=utf-8",
+            )
+
+        data = result["data"]
         return JSONResponse(
-            content={"count": len(data), "data": data},
+            content={
+                "supported": True,
+                "template": result["template"],
+                "count": len(data),
+                "data": data,
+                "time_taken_minutes": elapsed_minutes,
+            },
             media_type="application/json; charset=utf-8",
         )
     except Exception as e:
+        elapsed_seconds = time.time() - start_time
+        elapsed_minutes = round(elapsed_seconds / 60, 2)
         return JSONResponse(
             status_code=500,
-            content={"error": str(e), "count": 0, "data": []},
+            content={
+                "error": str(e),
+                "count": 0,
+                "data": [],
+                "time_taken_minutes": elapsed_minutes,
+            },
             media_type="application/json; charset=utf-8",
         )
