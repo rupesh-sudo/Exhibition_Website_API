@@ -166,7 +166,7 @@ def detect_template(url):
     except Exception:
         html = ""
 
-    if "exhibitors__container-list" in html and "my-modal" in html:
+    if "exhibitors__container-list" in html:
         return "ptak_warsaw"
 
     return None
