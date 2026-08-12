@@ -149,8 +149,178 @@ def scrape_ptak_warsaw(url):
 
 
 # ============================================================
-# ROUTER: detects the right scraper by HTML structure, not URL/domain
+# TEMPLATE: ALGOLIA INSTANTSEARCH EXHIBITOR DIRECTORIES
+# (groenesector.nl, empack-schweiz.ch, and similar sites sharing
+#  the same underlying exhibitor-directory platform)
 # ============================================================
+LISTING_CARD_SELECTORS = [
+    "li.ais-Hits-item article.card.hit__container",
+    "li.ais-Hits-item",
+]
+CARD_LINK_SELECTORS = ["a.card__link", "a[href]"]
+CARD_NAME_SELECTORS = ["h2", "h3"]
+
+
+def collect_algolia_links(start_url, max_pages=25):
+    driver = get_driver()
+    links = []
+    seen = set()
+
+    try:
+        driver.get(start_url)
+        wait = WebDriverWait(driver, 15)
+        dismiss_cookie_banner(driver)
+
+        page_number = 1
+        while True:
+            cards = []
+            for sel in LISTING_CARD_SELECTORS:
+                try:
+                    wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, sel)))
+                    cards = driver.find_elements(By.CSS_SELECTOR, sel)
+                    if cards:
+                        break
+                except Exception:
+                    continue
+
+            print(f"Page {page_number}: found {len(cards)} cards")
+
+            for card in cards:
+                profile_url = ""
+                for lsel in CARD_LINK_SELECTORS:
+                    try:
+                        link_el = card.find_element(By.CSS_SELECTOR, lsel)
+                        href = link_el.get_attribute("href")
+                        if href:
+                            profile_url = href.strip()
+                            break
+                    except Exception:
+                        continue
+
+                company_name = ""
+                for nsel in CARD_NAME_SELECTORS:
+                    try:
+                        company_name = card.find_element(By.CSS_SELECTOR, nsel).text.strip()
+                        if company_name:
+                            break
+                    except Exception:
+                        continue
+
+                if profile_url and profile_url not in seen:
+                    seen.add(profile_url)
+                    links.append({"company_name": company_name, "profile_link": profile_url})
+
+            # Find and follow next-page link
+            next_elements = driver.find_elements(
+                By.CSS_SELECTOR, "li.ais-Pagination-item--nextPage a"
+            )
+            if not next_elements:
+                break
+
+            next_button = next_elements[0]
+            try:
+                parent_li = next_button.find_element(By.XPATH, "./..")
+                if "ais-Pagination-item--disabled" in (parent_li.get_attribute("class") or ""):
+                    break
+            except Exception:
+                pass
+
+            next_url = (next_button.get_attribute("href") or "").strip()
+            if not next_url or page_number >= max_pages:
+                break
+
+            page_number += 1
+            driver.get(next_url)
+            time.sleep(1)
+    finally:
+        driver.quit()
+
+    return links
+
+
+def scrape_algolia_family(start_url):
+    links = collect_algolia_links(start_url)
+    print(f"Total exhibitor profile links found: {len(links)}")
+
+    driver = get_driver()
+    data = []
+    wait = WebDriverWait(driver, 20)
+
+    try:
+        for item in links:
+            profile_url = item["profile_link"]
+            try:
+                driver.get(profile_url)
+                wait.until(
+                    EC.presence_of_element_located((By.CSS_SELECTOR, "h1.stand-details__title"))
+                )
+                time.sleep(1)
+
+                try:
+                    name = driver.find_element(
+                        By.CSS_SELECTOR, "h1.stand-details__title"
+                    ).text.strip()
+                except Exception:
+                    name = item.get("company_name", "")
+                if not name:
+                    name = item.get("company_name", "")
+
+                address = ""
+                try:
+                    for el in driver.find_elements(
+                        By.CSS_SELECTOR, "div.contact-info-card__info-line-content"
+                    ):
+                        text = el.text.strip()
+                        if text and not text.startswith("http") and "@" not in text and "www." not in text.lower():
+                            address = text
+                            break
+                except Exception:
+                    pass
+
+                website = ""
+                social_sites = [
+                    "linkedin.com", "facebook.com", "instagram.com", "twitter.com",
+                    "x.com", "youtube.com", "tiktok.com", "pinterest.com", "whatsapp.com",
+                ]
+                website_selectors = [
+                    "div.contact-info-card__info-line-content a",
+                    "div.contact-info-card__info-line a",
+                    "section.card.contact-info-card a[href^='http']",
+                ]
+                for wsel in website_selectors:
+                    try:
+                        for link_el in driver.find_elements(By.CSS_SELECTOR, wsel):
+                            href = (link_el.get_attribute("href") or "").strip()
+                            if not href:
+                                continue
+                            href_lower = href.lower()
+                            if any(s in href_lower for s in social_sites):
+                                continue
+                            if urlparse(start_url).netloc.lower() in href_lower:
+                                continue
+                            website = href
+                            break
+                    except Exception:
+                        continue
+                    if website:
+                        break
+
+                data.append({
+                    "name": name,
+                    "address": address,
+                    "website": website,
+                    "source_url": profile_url,
+                })
+            except Exception as row_error:
+                print(f"Skipped {profile_url}: {row_error}")
+                continue
+    finally:
+        driver.quit()
+
+    return data
+
+
+
 def detect_template(url):
     """Fetch raw HTML and check for signature markers unique to each known template."""
     headers = {
@@ -169,6 +339,9 @@ def detect_template(url):
     if "exhibitors__container-list" in html:
         return "ptak_warsaw"
 
+    if "ais-Hits-item" in html or "ais-Pagination" in html:
+        return "algolia_family"
+
     return None
 
 
@@ -177,6 +350,9 @@ def route_scraper(url):
 
     if template == "ptak_warsaw":
         return {"supported": True, "template": "ptak_warsaw", "data": scrape_ptak_warsaw(url)}
+
+    if template == "algolia_family":
+        return {"supported": True, "template": "algolia_family", "data": scrape_algolia_family(url)}
 
     return {
         "supported": False,
